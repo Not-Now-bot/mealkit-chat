@@ -175,7 +175,7 @@ def load_memory(char_id):
 def load_user_note(char_id): return load_json("usernotes", f"{char_id}.json").get("content", "")
 def save_user_note(char_id, content): save_json("usernotes", f"{char_id}.json", {"content": content})
 
-# 로직 함수
+# LLM 함수
 def trigger_lorebooks(text, lorebooks):
     act = []
     text = text.lower()
@@ -186,6 +186,8 @@ def trigger_lorebooks(text, lorebooks):
     return "\n[Active Lorebook]\n" + "\n".join(act[:5]) + "\n" if act else ""
 
 def generate_response(chat_model_id, prompt_temp, c_char, c_user, mem, lore, history, user_note, temperature, top_p, max_tokens):
+    # 만약 history의 마지막이 assistant라면 (재생성 상황 등), 그걸 제외한 컨텍스트를 보내야 함
+    # 하지만 보통 append 하기 전에 호출하므로 history 그대로 사용
     chat_model = genai.GenerativeModel(chat_model_id)
     gen_config = GenerationConfig(temperature=temperature, top_p=top_p, max_output_tokens=max_tokens)
     safety = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
@@ -274,45 +276,75 @@ if sel_cid:
 
     with tab1:
         # ====================================================
-        # [수정 기능] 메시지 렌더링 루프 개선
+        # [NEW] 메시지 루프 + 팝오버 메뉴 (⋮)
         # ====================================================
-        # 메시지 하나하나에 번호(idx)를 붙여서 출력
+        history_len = len(st.session_state[sess_key])
+        
         for idx, m in enumerate(st.session_state[sess_key]):
             with st.chat_message(m["role"]):
-                # Case 1: 현재 이 메시지가 '수정 모드'인 경우
+                # 1. 수정 모드일 때
                 if st.session_state.get(f"edit_mode_{sel_cid}") == idx:
-                    # 텍스트 수정 창 표시
-                    new_content = st.text_area(f"메시지 수정 (#{idx})", value=m["content"], height=100, key=f"edit_ta_{idx}")
-                    col_e1, col_e2 = st.columns([1, 4])
-                    if col_e1.button("💾 저장", key=f"save_{idx}"):
-                        # 1. 내용을 업데이트
+                    new_content = st.text_area(f"내용 수정 ({idx})", value=m["content"], height=100, key=f"ea_{idx}")
+                    col_s, col_c = st.columns([1, 4])
+                    if col_s.button("저장", key=f"s_{idx}"):
                         st.session_state[sess_key][idx]["content"] = new_content
-                        # 2. 구글 시트에 저장
                         save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
-                        # 3. 수정 모드 종료
                         st.session_state[f"edit_mode_{sel_cid}"] = -1
                         st.rerun()
-                    if col_e2.button("취소", key=f"cancel_{idx}"):
+                    if col_c.button("취소", key=f"c_{idx}"):
                         st.session_state[f"edit_mode_{sel_cid}"] = -1
                         st.rerun()
                 
-                # Case 2: 평범한 '보기 모드'인 경우
+                # 2. 일반 보기 모드
                 else:
                     st.markdown(m["content"])
-                    # 메시지 아래에 작게 수정/삭제 버튼 배치
-                    row_btn = st.columns([1, 1, 10]) # 왼쪽부터 수정, 삭제, 여백
-                    if row_btn[0].button("✏️", key=f"btn_edit_{idx}", help="이 메시지 수정"):
-                        st.session_state[f"edit_mode_{sel_cid}"] = idx
-                        st.rerun()
-                    
-                    if row_btn[1].button("🗑️", key=f"btn_del_{idx}", help="이 메시지 삭제"):
-                         # 리스트에서 해당 인덱스 삭제
-                        del st.session_state[sess_key][idx]
-                        save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
-                        st.rerun()
+                    # [메뉴 버튼 숨기기]: 팝오버(Popover) 사용
+                    # use_container_width=False로 작게 만듦
+                    with st.popover("⋮", help="메뉴 열기"):
+                        # (1) 수정 버튼
+                        if st.button("✏️ 수정하기", key=f"p_e_{idx}", use_container_width=True):
+                            st.session_state[f"edit_mode_{sel_cid}"] = idx
+                            st.rerun()
+                        
+                        # (2) 삭제 버튼
+                        if st.button("🗑️ 삭제하기", key=f"p_d_{idx}", use_container_width=True):
+                            del st.session_state[sess_key][idx]
+                            save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
+                            st.rerun()
+
+                        # (3) 재생성 (Regenerate) - 마지막 봇 메시지인 경우에만
+                        # 조건: 역할이 assistant이면서, 리스트의 맨 마지막 메시지일 때
+                        if m["role"] == "assistant" and idx == history_len - 1:
+                            if st.button("🔄 다시 생성 (Regenerate)", key=f"p_r_{idx}", use_container_width=True):
+                                # 1. 현재 메시지 삭제
+                                del st.session_state[sess_key][idx]
+                                # 2. 로딩 표시 및 재생성
+                                with st.spinner("답변을 다시 생각하는 중..."):
+                                    # 히스토리가 바뀌었으므로 바로 다시 던짐 (여기서 이전 내용은 이미 삭제됨)
+                                    try:
+                                        r = generate_response(chat_model_id, "", curr_char, curr_user, mem_data, curr_char.get("lorebooks",[]), st.session_state[sess_key], u_note, 1.0, 0.95, 8192)
+                                        st.session_state[sess_key].append({"role":"assistant", "content":r})
+                                        save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
+                                        st.rerun()
+                                    except Exception as e: st.error(f"재생성 실패: {e}")
 
         # ====================================================
-        # 입력창 및 응답 생성
+        # [NEW] 끊긴 대화 잇기 (마지막이 User일 때)
+        # ====================================================
+        # 사용자가 봇의 답변을 삭제했거나, 오류로 저장이 안 됐을 때 수동으로 트리거
+        if st.session_state[sess_key] and st.session_state[sess_key][-1]["role"] == "user":
+            st.warning("⚠️ 마지막 대화가 답변 없이 끝났습니다.")
+            if st.button("🔄 답변 생성하기 (Retry)", type="primary", use_container_width=True):
+                with st.spinner("답변 작성 중..."):
+                    try:
+                        r = generate_response(chat_model_id, "", curr_char, curr_user, mem_data, curr_char.get("lorebooks",[]), st.session_state[sess_key], u_note, 1.0, 0.95, 8192)
+                        st.session_state[sess_key].append({"role":"assistant", "content":r})
+                        save_json("history", f"{sel_cid}.json", st.session_state[sess_key]) 
+                        st.rerun()
+                    except Exception as e: st.error(f"오류: {e}")
+
+        # ====================================================
+        # 채팅 입력창
         # ====================================================
         if p := st.chat_input(f"{curr_user['name']} (으)로 대화..."):
             st.session_state[sess_key].append({"role":"user", "content":p})
