@@ -12,7 +12,6 @@ from oauth2client.service_account import ServiceAccountCredentials
 # ==========================================
 st.set_page_config(page_title="Eternal Memory Chat", layout="wide")
 
-# [보안 1] 비밀번호 확인
 def check_password():
     if "PASSWORD" not in st.secrets["general"]:
         st.error("Secrets에 PASSWORD가 없습니다.")
@@ -36,7 +35,6 @@ def check_password():
 
 if not check_password(): st.stop()
 
-# [보안 2] API 키 설정
 try:
     genai.configure(api_key=st.secrets["general"]["GOOGLE_API_KEY"])
 except:
@@ -60,7 +58,7 @@ except Exception as e:
     st.error(f"구글 시트 연결 실패! 설정 확인 필요.\n{e}"); st.stop()
 
 # ==========================================
-# [초거대 데이터 대응] Save/Load 함수
+# [데이터 핸들링] 저장 / 로드 / 삭제
 # ==========================================
 CHUNK_SIZE = 40000 
 
@@ -93,8 +91,20 @@ def save_json(folder, filename, data):
         st.toast(f"저장 중 문제 발생: {e}") 
         print(f"Save Error {full_key}: {e}")
 
+# [신규 기능] 삭제 함수 추가
+def delete_json(folder, filename):
+    full_key = f"{folder}/{filename}"
+    try:
+        cell = SHEET.find(full_key, in_column=1)
+        if cell:
+            SHEET.delete_rows(cell.row) # 해당 줄을 삭제
+            return True
+    except Exception as e:
+        st.error(f"삭제 실패: {e}")
+    return False
+
 # ==========================================
-# 1. 설정 및 상수
+# 설정 및 모델 로드
 # ==========================================
 DEFAULT_CONFIG = {  
     "chat_model": "models/gemini-1.5-pro",  
@@ -123,7 +133,7 @@ def save_advanced_config(chat, mem, lev, temp, top, tok):
     save_json("config", "main.json", curr)
 
 # ==========================================
-# 데이터 로더 (기초 정보)
+# 데이터 로더
 # ==========================================
 def get_all_data_optimized():
     try: return SHEET.get_all_values() 
@@ -171,7 +181,7 @@ def load_memory(char_id):
 def load_user_note(char_id): return load_json("usernotes", f"{char_id}.json").get("content", "")
 def save_user_note(char_id, content): save_json("usernotes", f"{char_id}.json", {"content": content})
 
-# 로직 함수들
+# 로직 함수
 def trigger_lorebooks(text, lorebooks):
     act = []
     text = text.lower()
@@ -214,9 +224,8 @@ except Exception as e:
 
 with st.sidebar:
     st.title("☁️ 클라우드 메모리 챗봇")
-    st.caption("35만 자 OK / 멀티 페르소나")
+    st.caption("삭제 기능 추가됨")
     
-    # 모델 선택
     try: av_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]; av_models.sort()
     except: av_models = ["models/gemini-1.5-flash"]
     try: ic = av_models.index(current_config.get("chat_model"))
@@ -227,7 +236,6 @@ with st.sidebar:
         st.rerun()
     st.divider()
     
-    # 캐릭터 선택
     if CHARACTER_DB:
         char_options = list(CHARACTER_DB.keys())
         saved_cid = current_config.get("last_char_id", "")
@@ -241,7 +249,6 @@ with st.sidebar:
     else:
         st.info("Studio에서 캐릭터를 만드세요."); curr_char = None; sel_cid = None
 
-    # 유저 선택
     user_options = list(USER_DB.keys())
     saved_uid = current_config.get("last_user_id", "")
     if saved_uid not in user_options and user_options: saved_uid = user_options[0]
@@ -260,32 +267,20 @@ with st.sidebar:
     if st.button("🔄 새로고침"): st.rerun()
 
 # 탭 구성
-tab1, tab2, tab3 = st.tabs(["💬 대화", "🧠 기억", "✏️ 스튜디오(생성/수정)"])
+tab1, tab2, tab3 = st.tabs(["💬 대화", "🧠 기억", "✏️ 스튜디오"])
 
 if sel_cid:
-    # ----------------------------------------------------
-    # [설명: 이부분이 바뀌었습니다!]
-    # 히스토리 로드 및 '첫 메시지' 자동 주입 로직
-    # ----------------------------------------------------
     sess_key = f"hist_{sel_cid}"
     if sess_key not in st.session_state:
-        # 1. 엑셀에서 대화 기록 불러옴
         hf = load_json("history", f"{sel_cid}.json")
-        
-        # 2. 만약 기록이 텅 비어있고(None 또는 []) + 캐릭터의 첫 메시지가 있다면?
         if not hf and curr_char.get("first_message"):
-            # 첫 메시지를 기록으로 만들어버림
             hf = [{"role": "assistant", "content": curr_char["first_message"]}]
-            # DB에도 바로 저장 (안그러면 새로고침하면 또 사라짐)
             save_json("history", f"{sel_cid}.json", hf)
-        
-        # 3. 세션에 저장
         st.session_state[sess_key] = hf if hf else []
     
     mem_data = load_memory(sel_cid)
     u_note = load_user_note(sel_cid)
 
-    # 대화 탭 (UI 표시)
     with tab1:
         for m in st.session_state[sess_key]:
             with st.chat_message(m["role"]): st.markdown(m["content"])
@@ -311,9 +306,9 @@ if sel_cid:
             save_json("history", f"{sel_cid}.json", []); st.rerun()
 
     with tab3:
-        # 생성/수정 모드 UI
         col1, col2 = st.columns(2)
         
+        # --- 왼쪽: 캐릭터 관리 ---
         with col1:
             st.subheader("🤖 캐릭터 관리")
             mode_char = st.radio("작업 모드", ["기존 캐릭터 수정", "새 캐릭터 생성"], key="mode_char", horizontal=True)
@@ -326,18 +321,27 @@ if sel_cid:
                 c_id_val, c_name_val, c_desc_val, c_msg_val, c_sys_val = "", "", "", "", ""
                 c_btn_txt, c_id_disable = "새 캐릭터 생성", False
             
-            ncid = st.text_input("캐릭터 ID (영어만, 공백X)", value=c_id_val, disabled=c_id_disable)
+            ncid = st.text_input("캐릭터 ID", value=c_id_val, disabled=c_id_disable)
             ncnm = st.text_input("캐릭터 이름", value=c_name_val)
-            ncds = st.text_area("설명 / 성격", value=c_desc_val, height=100)
-            nfs = st.text_area("첫 메시지 (대화 시작시 자동 출력)", value=c_msg_val)
-            nsys = st.text_area("시스템 프롬프트 (세계관)", value=c_sys_val, height=150)
+            ncds = st.text_area("설명", value=c_desc_val, height=100)
+            nfs = st.text_area("첫 메시지", value=c_msg_val)
+            nsys = st.text_area("시스템 프롬프트", value=c_sys_val, height=150)
             
             if st.button(c_btn_txt, key="btn_save_char"):
-                if not ncid: st.error("ID는 필수입니다."); st.stop()
+                if not ncid: st.error("ID 필수"); st.stop()
                 new_data = {"name": ncnm, "description": ncds, "first_message": nfs, "system_prompt": nsys, "lorebooks": []}
                 save_json("characters", f"{ncid}.json", new_data)
-                st.success(f"캐릭터 '{ncnm}' 저장 완료!"); time.sleep(1); st.rerun()
+                st.success(f"저장 완료!"); time.sleep(1); st.rerun()
+            
+            # [삭제 버튼 추가]
+            if mode_char == "기존 캐릭터 수정" and curr_char:
+                st.divider()
+                if st.button("🗑️ 이 캐릭터 영구 삭제", type="primary", key="del_char_btn"):
+                    if delete_json("characters", f"{sel_cid}.json"):
+                        st.success("캐릭터 삭제됨. 잘 가요..."); time.sleep(1); st.rerun()
+                    else: st.error("삭제 실패")
 
+        # --- 오른쪽: 유저 관리 ---
         with col2:
             st.subheader("👤 유저 페르소나 관리")
             mode_user = st.radio("작업 모드", ["현재 페르소나 수정", "새 페르소나 생성"], key="mode_user", horizontal=True)
@@ -350,21 +354,28 @@ if sel_cid:
                 u_id_val, u_name_val, u_gen_val, u_age_val, u_prof_val = "", "", "", "", ""
                 u_btn_txt, u_id_disable = "새 페르소나 생성", False
 
-            uid_input = st.text_input("유저 ID (영어만)", value=u_id_val, disabled=u_id_disable)
+            uid_input = st.text_input("유저 ID", value=u_id_val, disabled=u_id_disable)
             u_name = st.text_input("유저 이름", value=u_name_val)
             u_gender = st.text_input("성별", value=u_gen_val)
             u_age = st.text_input("나이", value=u_age_val)
-            u_profile = st.text_area("프로필 (봇이 인식할 내 설정)", value=u_prof_val, height=150)
+            u_profile = st.text_area("프로필", value=u_prof_val, height=150)
 
             if st.button(u_btn_txt, key="btn_save_user"):
-                if not uid_input: st.error("ID는 필수입니다."); st.stop()
+                if not uid_input: st.error("ID 필수"); st.stop()
                 new_user_data = {"name": u_name, "gender": u_gender, "age": u_age, "profile": u_profile}
                 save_json("users", f"{uid_input}.json", new_user_data)
-                st.success(f"유저 '{u_name}' 저장 완료!"); time.sleep(1); st.rerun()
+                st.success(f"저장 완료!"); time.sleep(1); st.rerun()
+
+            # [삭제 버튼 추가]
+            if mode_user == "현재 페르소나 수정" and curr_user and sel_uid != "default":
+                st.divider()
+                if st.button("🗑️ 이 페르소나 영구 삭제", type="primary", key="del_user_btn"):
+                    if delete_json("users", f"{sel_uid}.json"):
+                        st.success("페르소나 삭제됨."); time.sleep(1); st.rerun()
 
 else:
     with tab3:
-        st.warning("등록된 캐릭터가 없습니다. 첫 번째 캐릭터를 만들어주세요.")
+        st.warning("등록된 캐릭터가 없습니다.")
         ncid = st.text_input("캐릭터 ID")
         ncnm = st.text_input("이름")
         if st.button("생성"): save_json("characters", f"{ncid}.json", {"name":ncnm}); st.rerun()
