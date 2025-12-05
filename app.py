@@ -69,7 +69,6 @@ def load_json(folder, filename):
     try:
         cell = SHEET.find(full_key, in_column=1)
         if cell:
-            # 그 줄의 모든 데이터(조각들)를 가져와서 합치기
             row_values = SHEET.row_values(cell.row)
             if len(row_values) > 1:
                 full_text = "".join(row_values[1:])
@@ -82,16 +81,13 @@ def save_json(folder, filename, data):
     full_key = f"{folder}/{filename}"
     try:
         data_str = json.dumps(data, ensure_ascii=False)
-        # 40,000자씩 자르기
         chunks = [data_str[i:i+CHUNK_SIZE] for i in range(0, len(data_str), CHUNK_SIZE)]
         row_data = [full_key] + chunks
         
         cell = SHEET.find(full_key, in_column=1)
         if cell:
-            # 시트 열 부족하면 늘리기
             if len(row_data) > SHEET.col_count:
                 SHEET.resize(cols=len(row_data) + 5)
-            # 해당 줄 업데이트
             SHEET.update(range_name=f"A{cell.row}", values=[row_data])
         else:
             SHEET.append_row(row_data)
@@ -100,7 +96,7 @@ def save_json(folder, filename, data):
         print(f"Save Error {full_key}: {e}")
 
 # ==========================================
-# 1. 설정 및 상수 (아까 실수로 빠트린 부분! 복구완료)
+# 1. 설정 및 상수
 # ==========================================
 DEFAULT_CONFIG = {  
     "chat_model": "models/gemini-1.5-pro",  
@@ -141,14 +137,12 @@ def load_characters():
     db = {}
     for r in rows:
         if not r: continue
-        fname = r[0] # 파일명(A열)
+        fname = r[0]
         if fname.startswith('characters/') and fname.endswith('.json'):
             cid = fname.split('/')[-1].replace('.json', '')
             try:
-                # 조각난 내용 합치기 (B열, C열...)
                 full_content = "".join(r[1:]) 
                 if not full_content: continue
-                
                 data = json.loads(full_content)
                 for k in ["name","description","system_prompt","first_message","image"]: data.setdefault(k,"")
                 data.setdefault("lorebooks", [])
@@ -171,8 +165,7 @@ def load_users():
             
     if not db:
         def_u = {"name": "User", "gender": "?", "age": "?", "profile": "Traveler"}
-        # 기본값 생성
-        save_json("users", "default.json", def_u)
+        # 여기서는 기본값 생성 안 함 (불필요한 쓰기 방지)
         db["default"] = def_u
     return db
 
@@ -194,22 +187,24 @@ def trigger_lorebooks(text, lorebooks):
             if tag in text: act.append(b.get("content", "")); break
     return "\n[Active Lorebook]\n" + "\n".join(act[:5]) + "\n" if act else ""
 
-def get_safety_settings():
-    return {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
-
 def generate_response(chat_model_id, prompt_temp, c_char, c_user, mem, lore, history, user_note, temperature, top_p, max_tokens):
     chat_model = genai.GenerativeModel(chat_model_id)
     gen_config = GenerationConfig(temperature=temperature, top_p=top_p, max_output_tokens=max_tokens)
-    safety = get_safety_settings()
+    
+    # 안전 설정 해제 (필요시 조절)
+    safety = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
+    
     recent = history[-1]['content'] if history and history[-1]['role'] == 'user' else ""
     ctx = "\n".join([m['content'] for m in history[-5:]])
     active_lore = trigger_lorebooks(ctx + recent, c_char.get("lorebooks", []))
-    sys = f"""{prompt_temp}
-    [Target] {c_char['name']}: {c_char['description']}
-    [System] {c_char['system_prompt']}
-    [User] {c_user['name']} / {c_user.get('gender')} / {c_user.get('age')} / {c_user.get('profile')}
+    sys = f"""
+    [Situation] Roleplay Chat
+    [Target Character] {c_char['name']}: {c_char['description']}
+    [System Instruction] {c_char['system_prompt']}
+    [Current User Persona] Name: {c_user['name']}, Gender: {c_user.get('gender')}, Age: {c_user.get('age')}
+    [User Profile] {c_user.get('profile')}
     [User Note] {user_note}
-    [Memory] {mem.get('summary')} / {mem.get('location')} / {mem.get('relations')}
+    [Memory] {mem.get('summary')}
     {mem.get('recent_event')}
     {active_lore}"""
     full = f"System: {sys}\n" + "\n".join([f"{m['role']}: {m['content']}" for m in history])
@@ -218,7 +213,6 @@ def generate_response(chat_model_id, prompt_temp, c_char, c_user, mem, lore, his
 # ==========================================
 # 메인 UI
 # ==========================================
-# 데이터 로드
 try:
     CHARACTER_DB = load_characters()
     USER_DB = load_users()
@@ -229,12 +223,11 @@ except Exception as e:
 
 with st.sidebar:
     st.title("☁️ 클라우드 메모리 챗봇")
-    st.caption("35만 자도 거뜬한 무제한 저장소")
+    st.caption("35만 자 OK / 멀티 페르소나 지원")
     
-    # 모델 설정
+    # 모델 선택
     try: av_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]; av_models.sort()
     except: av_models = ["models/gemini-1.5-flash"]
-    
     try: ic = av_models.index(current_config.get("chat_model"))
     except: ic = 0
     chat_model_id = st.selectbox("모델", av_models, index=ic)
@@ -242,67 +235,68 @@ with st.sidebar:
     if chat_model_id != current_config.get("chat_model"):
         save_advanced_config(chat_model_id, current_config.get("memory_model", av_models[0]), "Standard", 1.0, 0.95, 8192)
         st.rerun()
-
     st.divider()
     
-    # 캐릭터 선택
+    # 1. 캐릭터 선택
     if CHARACTER_DB:
         char_options = list(CHARACTER_DB.keys())
         saved_cid = current_config.get("last_char_id", "")
-        # 저장된 ID가 현재 목록에 없으면 첫 번째 선택
-        if saved_cid not in char_options:
-            saved_cid = char_options[0]
-            
+        if saved_cid not in char_options: saved_cid = char_options[0]
+        
         try: default_cid_idx = char_options.index(saved_cid)
         except: default_cid_idx = 0
         
-        sel_cid = st.selectbox("🤖 캐릭터", char_options, index=default_cid_idx, format_func=lambda x: CHARACTER_DB[x]["name"])
+        sel_cid = st.selectbox("🤖 캐릭터 선택", char_options, index=default_cid_idx, format_func=lambda x: CHARACTER_DB[x]["name"])
         
         if sel_cid != current_config.get("last_char_id", ""):
-            update_config("last_char_id", sel_cid); st.rerun()
-            
+            update_config("last_char_id", sel_cid); st.rerun()  
         curr_char = CHARACTER_DB[sel_cid]
     else:
-        st.info("캐릭터가 없습니다. 스튜디오 탭에서 생성하세요.")
-        curr_char = None
-        sel_cid = None
+        st.info("Studio 탭에서 캐릭터를 먼저 만드세요.")
+        curr_char = None; sel_cid = None
 
-    # 유저 선택
+    # 2. 유저 페르소나 선택
     user_options = list(USER_DB.keys())
     saved_uid = current_config.get("last_user_id", "")
-    if saved_uid not in user_options and user_options: saved_uid = user_options[0]
-    
-    try: ui = user_options.index(saved_uid)
-    except: ui = 0
-    sel_uid = st.selectbox("👤 유저", user_options, index=ui, format_func=lambda x: USER_DB[x]["name"])
-    if sel_uid != current_config.get("last_user_id", ""): update_config("last_user_id", sel_uid); st.rerun()
-    curr_user = USER_DB[sel_uid]
-    
+    # 저장된 ID가 없거나 유효하지 않으면 첫 번째 유저 선택
+    if saved_uid not in user_options and user_options: 
+        saved_uid = user_options[0]
+
+    if user_options:
+        try: ui = user_options.index(saved_uid)
+        except: ui = 0
+        sel_uid = st.selectbox("👤 내 페르소나 선택", user_options, index=ui, format_func=lambda x: USER_DB[x]["name"])
+        
+        if sel_uid != current_config.get("last_user_id", ""): 
+            update_config("last_user_id", sel_uid); st.rerun()
+        curr_user = USER_DB[sel_uid]
+    else:
+        # 유저 DB가 아예 비어있을 경우 (최초 실행)
+        curr_user = {"name": "User", "gender": "?", "age": "?", "profile": "New Traveler"}
+        sel_uid = "default"
+
     st.divider()
-    if st.button("🔄 새로고침 (데이터 동기화)"): st.rerun()
+    if st.button("🔄 새로고침"): st.rerun()
 
 # 탭 구성
 tab1, tab2, tab3 = st.tabs(["💬 대화", "🧠 기억", "✏️ 스튜디오"])
 
 if sel_cid:
+    # 대화 UI
     sess_key = f"hist_{sel_cid}"
-    # 히스토리 로드 (구글 시트에서)
     if sess_key not in st.session_state:
         hf = load_json("history", f"{sel_cid}.json")
-        if not hf: hf = []
-        st.session_state[sess_key] = hf
+        st.session_state[sess_key] = hf if hf else []
     
     mem_data = load_memory(sel_cid)
     u_note = load_user_note(sel_cid)
 
     with tab1:
-        # 채팅 UI
         for m in st.session_state[sess_key]:
             with st.chat_message(m["role"]): st.markdown(m["content"])
         
-        if p := st.chat_input("메시지 입력..."):
+        if p := st.chat_input(f"{curr_user['name']}(으)로 대화하기..."):
             st.session_state[sess_key].append({"role":"user", "content":p})
-            # 즉시 저장 (비동기로 하면 좋지만 안정성을 위해 동기식)
             save_json("history", f"{sel_cid}.json", st.session_state[sess_key]) 
             
             try:
@@ -315,45 +309,57 @@ if sel_cid:
     with tab2:
         st.subheader("DB 저장된 기억")
         st.json(mem_data)
-        st.text_area("유저 노트 (수동 기록)", value=u_note, key="u_note_input")
+        st.text_area("유저 노트", value=u_note, key="u_note_input")
         if st.button("유저 노트 저장"):
-            save_user_note(sel_cid, st.session_state["u_note_input"])
-            st.success("저장됨")
-        
-        if st.button("대화 내역 초기화 (새 시즌)"):
+            save_user_note(sel_cid, st.session_state["u_note_input"]); st.success("저장됨")
+        if st.button("대화 초기화"):
             st.session_state[sess_key] = []
-            save_json("history", f"{sel_cid}.json", [])
-            st.success("대화 내역이 초기화되었습니다.")
-            st.rerun()
+            save_json("history", f"{sel_cid}.json", []); st.rerun()
 
     with tab3:
-        # 캐릭터 생성/수정
-        ncid = st.text_input("새 캐릭터 ID / 편집할 ID", sel_cid)
-        ncnm = st.text_input("캐릭터 이름", curr_char['name'] if curr_char else "")
-        ncds = st.text_area("설명", curr_char['description'] if curr_char else "")
-        nfs = st.text_area("첫 메시지", curr_char['first_message'] if curr_char else "")
-        nsys = st.text_area("시스템 프롬프트", curr_char['system_prompt'] if curr_char else "")
+        # 3. 스튜디오 (캐릭터 + 유저 설정)
+        col1, col2 = st.columns(2)
         
-        if st.button("캐릭터 저장/생성"):
-            if not ncid: st.error("ID를 입력하세요"); st.stop()
-            new_data = {
-                "name": ncnm, "description": ncds, "first_message": nfs, 
-                "system_prompt": nsys, "image": "", "lorebooks": []
-            }
-            save_json("characters", f"{ncid}.json", new_data)
-            st.success("구글 시트에 저장 완료!"); time.sleep(1); st.rerun()
+        # 왼쪽: 캐릭터 설정
+        with col1:
+            st.subheader("🤖 캐릭터 설정")
+            ncid = st.text_input("캐릭터 ID (영어)", sel_cid)
+            ncnm = st.text_input("캐릭터 이름", curr_char['name'] if curr_char else "")
+            ncds = st.text_area("설명 / 성격", curr_char['description'] if curr_char else "", height=100)
+            nfs = st.text_area("첫 메시지", curr_char['first_message'] if curr_char else "")
+            nsys = st.text_area("시스템 프롬프트 (세계관)", curr_char['system_prompt'] if curr_char else "", height=150)
             
-        if st.button("현재 캐릭터 삭제"):
-            # 실제 삭제 로직은 복잡하므로 (행 삭제)
-            # 여기서는 빈 칸으로 덮어쓰거나, 'deleted' 표시를 하는게 안전하지만
-            # 일단 '기능 미지원'으로 둡니다.
-            st.warning("구글 시트에서 해당 행을 직접 삭제해주세요.")
+            if st.button("캐릭터 저장/생성"):
+                new_data = {"name": ncnm, "description": ncds, "first_message": nfs, "system_prompt": nsys, "lorebooks": []}
+                save_json("characters", f"{ncid}.json", new_data)
+                st.success(f"{ncnm} 저장 완료!"); time.sleep(1); st.rerun()
+
+        # 오른쪽: 유저 페르소나 설정 (새로 추가된 부분!!)
+        with col2:
+            st.subheader("👤 유저 페르소나(나) 설정")
+            st.caption("여러 명의 '나'를 만들어 상황에 맞게 연기하세요.")
+            
+            # 현재 선택된 유저 정보로 채워넣기
+            uid_input = st.text_input("유저 ID (영어)", sel_uid, help="예: me_v1, friend_player")
+            u_name = st.text_input("이름", curr_user.get('name', ''), help="봇이 당신을 부를 이름")
+            u_gender = st.text_input("성별", curr_user.get('gender', ''))
+            u_age = st.text_input("나이", curr_user.get('age', ''))
+            u_profile = st.text_area("프로필 / 설정", curr_user.get('profile', ''), height=150, help="당신이 어떤 사람인지 봇에게 알려주세요.")
+
+            if st.button("유저 페르소나 저장/생성"):
+                if not uid_input: st.error("ID를 입력하세요"); st.stop()
+                new_user_data = {
+                    "name": u_name,
+                    "gender": u_gender,
+                    "age": u_age,
+                    "profile": u_profile
+                }
+                save_json("users", f"{uid_input}.json", new_user_data)
+                st.success(f"유저 '{u_name}' 저장 완료!"); time.sleep(1); st.rerun()
 
 else:
     with tab3:
-        st.warning("캐릭터를 먼저 생성해주세요.")
-        ncid = st.text_input("새 캐릭터 ID (영어)")
+        st.warning("먼저 캐릭터를 하나 생성하세요.")
+        ncid = st.text_input("새 캐릭터 ID")
         ncnm = st.text_input("이름")
-        if st.button("생성"):
-             save_json("characters", f"{ncid}.json", {"name":ncnm})
-             st.rerun()
+        if st.button("생성"): save_json("characters", f"{ncid}.json", {"name":ncnm}); st.rerun()
