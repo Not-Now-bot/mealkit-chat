@@ -44,12 +44,12 @@ if "current_profile_key" not in st.session_state:
     col1, col2, col3 = st.columns(3)
     
     with col1:
-        if st.button("👑 나 (Master)", type="primary", use_container_width=True):
+        if st.button("👑 지수", type="primary", use_container_width=True):
             st.session_state["current_profile_key"] = "config_master.json"
             st.rerun()
             
     with col2:
-        if st.button("🔥 친구 (Friend)", type="primary", use_container_width=True):
+        if st.button("🔥 혜령 (Friend)", type="primary", use_container_width=True):
             st.session_state["current_profile_key"] = "config_friend.json"
             st.rerun()
             
@@ -480,3 +480,4 @@ else:
         st.info("첫 캐릭터를 만드세요.")
         ni = st.text_input("ID"); nn = st.text_input("Name")
         if st.button("Create"): save_json("characters", f"{ni}.json", {"name":nn}); st.rerun()
+
