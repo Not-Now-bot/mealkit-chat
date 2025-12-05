@@ -69,7 +69,7 @@ def load_json(folder, filename):
             if len(row_values) > 1:
                 return json.loads("".join(row_values[1:]))
     except Exception as e:
-        print(f"Load Error ({full_key}): {e}")
+        pass # 조용히 넘어감 (파일 없을 때)
     return {}
 
 def save_json(folder, filename, data):
@@ -86,7 +86,6 @@ def save_json(folder, filename, data):
         else:
             SHEET.append_row(row_data)
     except Exception as e:
-        st.toast(f"저장 중 문제 발생: {e}") 
         print(f"Save Error {full_key}: {e}")
 
 def delete_json(folder, filename):
@@ -98,6 +97,49 @@ def delete_json(folder, filename):
             return True
     except Exception as e:
         st.error(f"삭제 실패: {e}")
+    return False
+
+# ==========================================
+# [NEW] 세션(멀티버스) 관리자
+# ==========================================
+# 세션 목록은 session_meta/{char_id}.json 에 저장합니다.
+# 실제 대화 파일은 history/{char_id}__{session_name}.json
+
+def get_session_meta(char_id):
+    meta = load_json("session_meta", f"{char_id}.json")
+    if not meta:
+        # 처음엔 Default 세션 하나 생성
+        return {"sessions": ["Default"], "last_used": "Default"}
+    return meta
+
+def save_session_meta(char_id, meta):
+    save_json("session_meta", f"{char_id}.json", meta)
+
+def create_new_session(char_id, simple_name):
+    meta = get_session_meta(char_id)
+    if simple_name in meta["sessions"]:
+        return False # 중복
+    meta["sessions"].append(simple_name)
+    meta["last_used"] = simple_name
+    save_session_meta(char_id, meta)
+    return True
+
+def delete_session(char_id, simple_name):
+    meta = get_session_meta(char_id)
+    if simple_name in meta["sessions"]:
+        # 1. 목록에서 제거
+        meta["sessions"].remove(simple_name)
+        # 2. 실제 파일 삭제 (history/ID__SessionName.json)
+        real_filename = f"{char_id}__{simple_name}.json"
+        delete_json("history", real_filename)
+        
+        # 3. 만약 남은게 없으면 Default 생성
+        if not meta["sessions"]:
+            meta["sessions"] = ["Default"]
+            
+        meta["last_used"] = meta["sessions"][0]
+        save_session_meta(char_id, meta)
+        return True
     return False
 
 # ==========================================
@@ -186,8 +228,6 @@ def trigger_lorebooks(text, lorebooks):
     return "\n[Active Lorebook]\n" + "\n".join(act[:5]) + "\n" if act else ""
 
 def generate_response(chat_model_id, prompt_temp, c_char, c_user, mem, lore, history, user_note, temperature, top_p, max_tokens):
-    # 만약 history의 마지막이 assistant라면 (재생성 상황 등), 그걸 제외한 컨텍스트를 보내야 함
-    # 하지만 보통 append 하기 전에 호출하므로 history 그대로 사용
     chat_model = genai.GenerativeModel(chat_model_id)
     gen_config = GenerationConfig(temperature=temperature, top_p=top_p, max_output_tokens=max_tokens)
     safety = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
@@ -221,6 +261,7 @@ except Exception as e:
 with st.sidebar:
     st.title("☁️ 클라우드 메모리 챗봇")
     
+    # 모델
     try: av_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]; av_models.sort()
     except: av_models = ["models/gemini-1.5-flash"]
     try: ic = av_models.index(current_config.get("chat_model"))
@@ -231,6 +272,7 @@ with st.sidebar:
         st.rerun()
     st.divider()
     
+    # 1. 캐릭터 선택
     if CHARACTER_DB:
         char_options = list(CHARACTER_DB.keys())
         saved_cid = current_config.get("last_char_id", "")
@@ -243,13 +285,53 @@ with st.sidebar:
     else:
         curr_char = None; sel_cid = None
 
+    # 2. [NEW] 세션(대화방) 관리자
+    current_session = "Default"
+    if curr_char:
+        # DB에서 세션 메타정보 로드
+        s_meta = get_session_meta(sel_cid)
+        s_list = s_meta["sessions"]
+        last_s = s_meta.get("last_used", "Default")
+        
+        # UI: 대화방 선택 (Expander로 감싸서 깔끔하게)
+        with st.expander("📂 대화방(세션) 관리", expanded=True):
+            # 세션 선택
+            try: s_idx = s_list.index(last_s)
+            except: s_idx = 0
+            
+            # 세션 선택 변경 감지 - key를 사용하여 session_state 업데이트 방지
+            sel_session = st.selectbox("대화방 목록", s_list, index=s_idx, key="session_selector")
+            
+            # 선택이 바뀌었으면 DB에 '마지막 사용'으로 저장하고 리런
+            if sel_session != last_s:
+                s_meta["last_used"] = sel_session
+                save_session_meta(sel_cid, s_meta)
+                st.rerun()
+            
+            current_session = sel_session
+            
+            # 새 세션 생성
+            new_sess_name = st.text_input("새 대화방 이름 (예: IF_루트)", key="new_sess_input")
+            if st.button("➕ 새 대화방 만들기"):
+                if new_sess_name.strip():
+                    if create_new_session(sel_cid, new_sess_name.strip()):
+                        st.success(f"대화방 '{new_sess_name}' 생성됨!"); time.sleep(0.5); st.rerun()
+                    else:
+                        st.error("이미 존재하는 이름입니다.")
+            
+            # 현재 세션 삭제
+            if len(s_list) > 1 and st.button(f"🗑️ '{current_session}' 삭제", type="primary"):
+                delete_session(sel_cid, current_session)
+                st.rerun()
+
+    # 3. 유저 페르소나 선택
     user_options = list(USER_DB.keys())
     saved_uid = current_config.get("last_user_id", "")
     if saved_uid not in user_options and user_options: saved_uid = user_options[0]
     if user_options:
         try: ui = user_options.index(saved_uid)
         except: ui = 0
-        sel_uid = st.selectbox("👤 내 페르소나 선택", user_options, index=ui, format_func=lambda x: USER_DB[x]["name"])
+        sel_uid = st.selectbox("👤 내 페르소나", user_options, index=ui, format_func=lambda x: USER_DB[x]["name"])
         if sel_uid != current_config.get("last_user_id", ""): update_config("last_user_id", sel_uid); st.rerun()
         curr_user = USER_DB[sel_uid]
     else:
@@ -260,99 +342,84 @@ with st.sidebar:
     if st.button("🔄 새로고침"): st.rerun()
 
 # 탭 구성
-tab1, tab2, tab3 = st.tabs(["💬 대화", "🧠 기억", "✏️ 스튜디오"])
+tab1, tab2, tab3 = st.tabs([f"💬 대화 ({current_session})", "🧠 기억", "✏️ 스튜디오"])
 
 if sel_cid:
-    sess_key = f"hist_{sel_cid}"
+    # ----------------------------------------------------
+    # 히스토리 로드 (세션별 분리)
+    # 파일명 규칙: history/{char_id}__{session_name}.json
+    # ----------------------------------------------------
+    real_hist_filename = f"{sel_cid}__{current_session}.json"
+    sess_key = f"hist_{sel_cid}_{current_session}"
+    
     if sess_key not in st.session_state:
-        hf = load_json("history", f"{sel_cid}.json")
+        hf = load_json("history", real_hist_filename)
+        # 1. 파일이 없고 & 첫 메시지 설정이 있다면 -> 자동 생성
         if not hf and curr_char.get("first_message"):
             hf = [{"role": "assistant", "content": curr_char["first_message"]}]
-            save_json("history", f"{sel_cid}.json", hf)
+            save_json("history", real_hist_filename, hf)
         st.session_state[sess_key] = hf if hf else []
     
     mem_data = load_memory(sel_cid)
     u_note = load_user_note(sel_cid)
 
     with tab1:
-        # ====================================================
-        # [NEW] 메시지 루프 + 팝오버 메뉴 (⋮)
-        # ====================================================
+        # 메시지 렌더링
         history_len = len(st.session_state[sess_key])
-        
         for idx, m in enumerate(st.session_state[sess_key]):
             with st.chat_message(m["role"]):
-                # 1. 수정 모드일 때
-                if st.session_state.get(f"edit_mode_{sel_cid}") == idx:
-                    new_content = st.text_area(f"내용 수정 ({idx})", value=m["content"], height=100, key=f"ea_{idx}")
+                if st.session_state.get(f"edit_mode_{sess_key}") == idx:
+                    new_content = st.text_area(f"수정 ({idx})", value=m["content"], height=100, key=f"ea_{idx}")
                     col_s, col_c = st.columns([1, 4])
                     if col_s.button("저장", key=f"s_{idx}"):
                         st.session_state[sess_key][idx]["content"] = new_content
-                        save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
-                        st.session_state[f"edit_mode_{sel_cid}"] = -1
+                        save_json("history", real_hist_filename, st.session_state[sess_key])
+                        st.session_state[f"edit_mode_{sess_key}"] = -1
                         st.rerun()
                     if col_c.button("취소", key=f"c_{idx}"):
-                        st.session_state[f"edit_mode_{sel_cid}"] = -1
+                        st.session_state[f"edit_mode_{sess_key}"] = -1
                         st.rerun()
-                
-                # 2. 일반 보기 모드
                 else:
                     st.markdown(m["content"])
-                    # [메뉴 버튼 숨기기]: 팝오버(Popover) 사용
-                    # use_container_width=False로 작게 만듦
-                    with st.popover("⋮", help="메뉴 열기"):
-                        # (1) 수정 버튼
-                        if st.button("✏️ 수정하기", key=f"p_e_{idx}", use_container_width=True):
-                            st.session_state[f"edit_mode_{sel_cid}"] = idx
+                    with st.popover("⋮", help="메뉴"):
+                        if st.button("✏️ 수정", key=f"p_e_{idx}", use_container_width=True):
+                            st.session_state[f"edit_mode_{sess_key}"] = idx
                             st.rerun()
-                        
-                        # (2) 삭제 버튼
-                        if st.button("🗑️ 삭제하기", key=f"p_d_{idx}", use_container_width=True):
+                        if st.button("🗑️ 삭제", key=f"p_d_{idx}", use_container_width=True):
                             del st.session_state[sess_key][idx]
-                            save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
+                            save_json("history", real_hist_filename, st.session_state[sess_key])
                             st.rerun()
-
-                        # (3) 재생성 (Regenerate) - 마지막 봇 메시지인 경우에만
-                        # 조건: 역할이 assistant이면서, 리스트의 맨 마지막 메시지일 때
+                        # 재생성 기능
                         if m["role"] == "assistant" and idx == history_len - 1:
-                            if st.button("🔄 다시 생성 (Regenerate)", key=f"p_r_{idx}", use_container_width=True):
-                                # 1. 현재 메시지 삭제
+                            if st.button("🔄 다시 생성", key=f"p_r_{idx}", use_container_width=True):
                                 del st.session_state[sess_key][idx]
-                                # 2. 로딩 표시 및 재생성
-                                with st.spinner("답변을 다시 생각하는 중..."):
-                                    # 히스토리가 바뀌었으므로 바로 다시 던짐 (여기서 이전 내용은 이미 삭제됨)
+                                with st.spinner("다시 생각 중..."):
                                     try:
                                         r = generate_response(chat_model_id, "", curr_char, curr_user, mem_data, curr_char.get("lorebooks",[]), st.session_state[sess_key], u_note, 1.0, 0.95, 8192)
                                         st.session_state[sess_key].append({"role":"assistant", "content":r})
-                                        save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
+                                        save_json("history", real_hist_filename, st.session_state[sess_key])
                                         st.rerun()
-                                    except Exception as e: st.error(f"재생성 실패: {e}")
+                                    except Exception as e: st.error(f"실패: {e}")
 
-        # ====================================================
-        # [NEW] 끊긴 대화 잇기 (마지막이 User일 때)
-        # ====================================================
-        # 사용자가 봇의 답변을 삭제했거나, 오류로 저장이 안 됐을 때 수동으로 트리거
+        # 끊긴 대화 잇기
         if st.session_state[sess_key] and st.session_state[sess_key][-1]["role"] == "user":
-            st.warning("⚠️ 마지막 대화가 답변 없이 끝났습니다.")
-            if st.button("🔄 답변 생성하기 (Retry)", type="primary", use_container_width=True):
+            if st.button("🔄 답변 생성하기 (Retry)", type="primary"):
                 with st.spinner("답변 작성 중..."):
                     try:
                         r = generate_response(chat_model_id, "", curr_char, curr_user, mem_data, curr_char.get("lorebooks",[]), st.session_state[sess_key], u_note, 1.0, 0.95, 8192)
                         st.session_state[sess_key].append({"role":"assistant", "content":r})
-                        save_json("history", f"{sel_cid}.json", st.session_state[sess_key]) 
+                        save_json("history", real_hist_filename, st.session_state[sess_key]) 
                         st.rerun()
                     except Exception as e: st.error(f"오류: {e}")
 
-        # ====================================================
-        # 채팅 입력창
-        # ====================================================
+        # 입력창
         if p := st.chat_input(f"{curr_user['name']} (으)로 대화..."):
             st.session_state[sess_key].append({"role":"user", "content":p})
-            save_json("history", f"{sel_cid}.json", st.session_state[sess_key]) 
+            save_json("history", real_hist_filename, st.session_state[sess_key]) 
             try:
                 r = generate_response(chat_model_id, "", curr_char, curr_user, mem_data, curr_char.get("lorebooks",[]), st.session_state[sess_key], u_note, 1.0, 0.95, 8192)
                 st.session_state[sess_key].append({"role":"assistant", "content":r})
-                save_json("history", f"{sel_cid}.json", st.session_state[sess_key]) 
+                save_json("history", real_hist_filename, st.session_state[sess_key]) 
                 st.rerun()
             except Exception as e: st.error(f"오류: {e}")
 
@@ -362,9 +429,10 @@ if sel_cid:
         st.text_area("유저 노트", value=u_note, key="u_note_input")
         if st.button("노트 저장"):
             save_user_note(sel_cid, st.session_state["u_note_input"]); st.success("저장됨")
-        if st.button("대화 초기화 (새 시즌)"):
+        # 초기화: 현재 세션 파일만 초기화
+        if st.button(f"🗑️ 현재 대화방({current_session}) 초기화", type="primary"):
             st.session_state[sess_key] = []
-            save_json("history", f"{sel_cid}.json", []); st.rerun()
+            save_json("history", real_hist_filename, []); st.rerun()
 
     with tab3:
         col1, col2 = st.columns(2)
@@ -425,7 +493,6 @@ if sel_cid:
                 if st.button("🗑️ 이 페르소나 삭제", type="primary", key="del_user_btn"):
                     if delete_json("users", f"{sel_uid}.json"):
                         st.success("삭제됨."); time.sleep(1); st.rerun()
-
 else:
     with tab3:
         st.warning("등록된 캐릭터가 없습니다.")
