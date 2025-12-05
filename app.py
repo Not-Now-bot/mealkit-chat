@@ -60,7 +60,7 @@ except Exception as e:
     st.error(f"구글 시트 연결 실패! 설정 확인 필요.\n{e}"); st.stop()
 
 # ==========================================
-# [초거대 데이터 대응] Save/Load 함수 (청크 분할)
+# [초거대 데이터 대응] Save/Load 함수
 # ==========================================
 CHUNK_SIZE = 40000 
 
@@ -123,7 +123,7 @@ def save_advanced_config(chat, mem, lev, temp, top, tok):
     save_json("config", "main.json", curr)
 
 # ==========================================
-# 데이터 로더
+# 데이터 로더 (기초 정보)
 # ==========================================
 def get_all_data_optimized():
     try: return SHEET.get_all_values() 
@@ -159,7 +159,7 @@ def load_users():
                 full = "".join(r[1:])
                 db[uid] = json.loads(full)
             except: pass
-    if not db: # 기본 유저 생성
+    if not db:
         def_u = {"name": "User", "gender": "?", "age": "?", "profile": "Traveler"}
         db["default"] = def_u
     return db
@@ -263,14 +263,29 @@ with st.sidebar:
 tab1, tab2, tab3 = st.tabs(["💬 대화", "🧠 기억", "✏️ 스튜디오(생성/수정)"])
 
 if sel_cid:
+    # ----------------------------------------------------
+    # [설명: 이부분이 바뀌었습니다!]
+    # 히스토리 로드 및 '첫 메시지' 자동 주입 로직
+    # ----------------------------------------------------
     sess_key = f"hist_{sel_cid}"
     if sess_key not in st.session_state:
+        # 1. 엑셀에서 대화 기록 불러옴
         hf = load_json("history", f"{sel_cid}.json")
+        
+        # 2. 만약 기록이 텅 비어있고(None 또는 []) + 캐릭터의 첫 메시지가 있다면?
+        if not hf and curr_char.get("first_message"):
+            # 첫 메시지를 기록으로 만들어버림
+            hf = [{"role": "assistant", "content": curr_char["first_message"]}]
+            # DB에도 바로 저장 (안그러면 새로고침하면 또 사라짐)
+            save_json("history", f"{sel_cid}.json", hf)
+        
+        # 3. 세션에 저장
         st.session_state[sess_key] = hf if hf else []
     
     mem_data = load_memory(sel_cid)
     u_note = load_user_note(sel_cid)
 
+    # 대화 탭 (UI 표시)
     with tab1:
         for m in st.session_state[sess_key]:
             with st.chat_message(m["role"]): st.markdown(m["content"])
@@ -291,75 +306,49 @@ if sel_cid:
         st.text_area("유저 노트", value=u_note, key="u_note_input")
         if st.button("노트 저장"):
             save_user_note(sel_cid, st.session_state["u_note_input"]); st.success("저장됨")
-        if st.button("대화 초기화 (기억은 유지됨)"):
+        if st.button("대화 초기화 (새 시즌)"):
             st.session_state[sess_key] = []
             save_json("history", f"{sel_cid}.json", []); st.rerun()
 
     with tab3:
-        # ----------------------------------------------------------------
-        # [UX 개선] 모드 선택 (생성 vs 수정)
-        # ----------------------------------------------------------------
+        # 생성/수정 모드 UI
         col1, col2 = st.columns(2)
         
-        # --- 왼쪽: 캐릭터 관리 ---
         with col1:
             st.subheader("🤖 캐릭터 관리")
-            # 모드 선택 스위치
             mode_char = st.radio("작업 모드", ["기존 캐릭터 수정", "새 캐릭터 생성"], key="mode_char", horizontal=True)
             
-            # 입력폼 값 세팅
             if mode_char == "기존 캐릭터 수정" and curr_char:
-                c_id_val = sel_cid
-                c_name_val = curr_char['name']
-                c_desc_val = curr_char['description']
-                c_msg_val = curr_char['first_message']
-                c_sys_val = curr_char['system_prompt']
-                c_btn_txt = "수정사항 저장"
-                c_id_disable = True # 수정 때는 ID 변경 불가 (새 파일 되는 문제 방지)
+                c_id_val, c_name_val = sel_cid, curr_char['name']
+                c_desc_val, c_msg_val = curr_char['description'], curr_char['first_message']
+                c_sys_val, c_btn_txt, c_id_disable = curr_char['system_prompt'], "수정사항 저장", True
             else:
-                c_id_val = ""
-                c_name_val = ""
-                c_desc_val = ""
-                c_msg_val = ""
-                c_sys_val = ""
-                c_btn_txt = "새 캐릭터 생성"
-                c_id_disable = False
+                c_id_val, c_name_val, c_desc_val, c_msg_val, c_sys_val = "", "", "", "", ""
+                c_btn_txt, c_id_disable = "새 캐릭터 생성", False
             
-            # 입력 위젯
             ncid = st.text_input("캐릭터 ID (영어만, 공백X)", value=c_id_val, disabled=c_id_disable)
             ncnm = st.text_input("캐릭터 이름", value=c_name_val)
             ncds = st.text_area("설명 / 성격", value=c_desc_val, height=100)
-            nfs = st.text_area("첫 메시지", value=c_msg_val)
+            nfs = st.text_area("첫 메시지 (대화 시작시 자동 출력)", value=c_msg_val)
             nsys = st.text_area("시스템 프롬프트 (세계관)", value=c_sys_val, height=150)
             
             if st.button(c_btn_txt, key="btn_save_char"):
                 if not ncid: st.error("ID는 필수입니다."); st.stop()
                 new_data = {"name": ncnm, "description": ncds, "first_message": nfs, "system_prompt": nsys, "lorebooks": []}
-                # 수정 모드일 때 기존 데이터 유지를 위해 로어북 등은 병합, 여기서는 단순 덮어쓰기
                 save_json("characters", f"{ncid}.json", new_data)
                 st.success(f"캐릭터 '{ncnm}' 저장 완료!"); time.sleep(1); st.rerun()
 
-        # --- 오른쪽: 유저 관리 ---
         with col2:
             st.subheader("👤 유저 페르소나 관리")
             mode_user = st.radio("작업 모드", ["현재 페르소나 수정", "새 페르소나 생성"], key="mode_user", horizontal=True)
 
             if mode_user == "현재 페르소나 수정" and curr_user:
-                u_id_val = sel_uid
-                u_name_val = curr_user.get('name', '')
-                u_gen_val = curr_user.get('gender', '')
-                u_age_val = curr_user.get('age', '')
-                u_prof_val = curr_user.get('profile', '')
-                u_btn_txt = "수정사항 저장"
-                u_id_disable = True
+                u_id_val, u_name_val = sel_uid, curr_user.get('name', '')
+                u_gen_val, u_age_val = curr_user.get('gender', ''), curr_user.get('age', '')
+                u_prof_val, u_btn_txt, u_id_disable = curr_user.get('profile', ''), "수정사항 저장", True
             else:
-                u_id_val = ""
-                u_name_val = ""
-                u_gen_val = ""
-                u_age_val = ""
-                u_prof_val = ""
-                u_btn_txt = "새 페르소나 생성"
-                u_id_disable = False
+                u_id_val, u_name_val, u_gen_val, u_age_val, u_prof_val = "", "", "", "", ""
+                u_btn_txt, u_id_disable = "새 페르소나 생성", False
 
             uid_input = st.text_input("유저 ID (영어만)", value=u_id_val, disabled=u_id_disable)
             u_name = st.text_input("유저 이름", value=u_name_val)
@@ -374,7 +363,6 @@ if sel_cid:
                 st.success(f"유저 '{u_name}' 저장 완료!"); time.sleep(1); st.rerun()
 
 else:
-    # 캐릭터가 하나도 없을 때 강제 생성 화면
     with tab3:
         st.warning("등록된 캐릭터가 없습니다. 첫 번째 캐릭터를 만들어주세요.")
         ncid = st.text_input("캐릭터 ID")
