@@ -89,20 +89,27 @@ def load_json(folder, filename):
     except: pass
     return {}
 
+# [수정된 함수] gspread 최신 버전 대응
 def save_json(folder, filename, data):
     full_key = f"{folder}/{filename}"
     data_str = json.dumps(data, ensure_ascii=False)
     
     try:
-        try:
-            cell = SHEET.find(full_key, in_column=1)
-            # 이미 있으면 업데이트
+        # find 메서드는 찾는 값이 없으면 에러를 내지 않고 None을 반환합니다 (v6.0.0+)
+        cell = SHEET.find(full_key, in_column=1)
+        
+        if cell:
+            # 이미 파일이 있으면 -> 그 줄의 내용(2열)을 업데이트
             SHEET.update_cell(cell.row, 2, data_str)
-        except gspread.exceptions.CellNotFound:
-            # 없으면 새로 추가
+        else:
+            # 파일이 없으면 -> 맨 아래에 새로 추가
             SHEET.append_row([full_key, data_str])
+            
     except Exception as e:
-        st.toast(f"저장 실패(네트워크 오류?): {e}")
+        # 혹시 모를 또 다른 에러를 대비해 로그를 띄움
+        st.toast(f"저장 중 문제 발생: {e}")
+        # 디버깅용: 에러가 나면 콘솔에도 출력
+        print(f"Error saving {full_key}: {e}")
 
 # (주의) delete, listdir 등은 시트 방식에 맞게 흉내내야 합니다.
 # 이번 버전에서는 복잡성을 줄이기 위해 일부 기능(삭제, 이미지 업로드)은 제한하거나 단순화합니다.
@@ -330,3 +337,4 @@ else:
         if st.button("생성"):
              save_json("characters", f"{ncid}.json", {"name":ncnm})
              st.rerun()
+
