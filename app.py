@@ -43,7 +43,7 @@ except:
     st.error("Secrets에 GOOGLE_API_KEY가 없습니다."); st.stop()
 
 # ==========================================
-# [핵심] 구글 시트 데이터베이스 연결 (DB) - 무제한 확장판
+# [핵심] 구글 시트 데이터베이스 연결 (DB)
 # ==========================================
 @st.cache_resource
 def init_sheet_connection():
@@ -71,8 +71,7 @@ def load_json(folder, filename):
         if cell:
             row_values = SHEET.row_values(cell.row)
             if len(row_values) > 1:
-                full_text = "".join(row_values[1:])
-                return json.loads(full_text)
+                return json.loads("".join(row_values[1:]))
     except Exception as e:
         print(f"Load Error ({full_key}): {e}")
     return {}
@@ -86,8 +85,7 @@ def save_json(folder, filename, data):
         
         cell = SHEET.find(full_key, in_column=1)
         if cell:
-            if len(row_data) > SHEET.col_count:
-                SHEET.resize(cols=len(row_data) + 5)
+            if len(row_data) > SHEET.col_count: SHEET.resize(cols=len(row_data) + 5)
             SHEET.update(range_name=f"A{cell.row}", values=[row_data])
         else:
             SHEET.append_row(row_data)
@@ -111,8 +109,7 @@ DEFAULT_CONFIG = {
 
 def load_config():
     data = load_json("config", "main.json")
-    if not data: return DEFAULT_CONFIG
-    return data
+    return data if data else DEFAULT_CONFIG
 
 def update_config(key, value):
     curr = load_config()
@@ -126,7 +123,7 @@ def save_advanced_config(chat, mem, lev, temp, top, tok):
     save_json("config", "main.json", curr)
 
 # ==========================================
-# 데이터 로더 (리스트 방식 최적화)
+# 데이터 로더
 # ==========================================
 def get_all_data_optimized():
     try: return SHEET.get_all_values() 
@@ -159,20 +156,17 @@ def load_users():
         if fname.startswith('users/') and fname.endswith('.json'):
             uid = fname.split('/')[-1].replace('.json', '')
             try: 
-                full_content = "".join(r[1:])
-                db[uid] = json.loads(full_content)
+                full = "".join(r[1:])
+                db[uid] = json.loads(full)
             except: pass
-            
-    if not db:
+    if not db: # 기본 유저 생성
         def_u = {"name": "User", "gender": "?", "age": "?", "profile": "Traveler"}
-        # 여기서는 기본값 생성 안 함 (불필요한 쓰기 방지)
         db["default"] = def_u
     return db
 
 def load_memory(char_id):
     mem = load_json("memory", f"{char_id}.json")
-    if not mem: return {"summary": "기록 없음", "recent_event": "", "location": "알 수 없음", "relations": ""}
-    return mem
+    return mem if mem else {"summary": "기록 없음", "recent_event": "", "location": "알 수 없음", "relations": ""}
 
 def load_user_note(char_id): return load_json("usernotes", f"{char_id}.json").get("content", "")
 def save_user_note(char_id, content): save_json("usernotes", f"{char_id}.json", {"content": content})
@@ -190,8 +184,6 @@ def trigger_lorebooks(text, lorebooks):
 def generate_response(chat_model_id, prompt_temp, c_char, c_user, mem, lore, history, user_note, temperature, top_p, max_tokens):
     chat_model = genai.GenerativeModel(chat_model_id)
     gen_config = GenerationConfig(temperature=temperature, top_p=top_p, max_output_tokens=max_tokens)
-    
-    # 안전 설정 해제 (필요시 조절)
     safety = {HarmCategory.HARM_CATEGORY_HARASSMENT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_HATE_SPEECH: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_SEXUALLY_EXPLICIT: HarmBlockThreshold.BLOCK_NONE, HarmCategory.HARM_CATEGORY_DANGEROUS_CONTENT: HarmBlockThreshold.BLOCK_NONE}
     
     recent = history[-1]['content'] if history and history[-1]['role'] == 'user' else ""
@@ -218,12 +210,11 @@ try:
     USER_DB = load_users()
     current_config = load_config()
 except Exception as e:
-    st.error(f"데이터 로드 중 치명적 오류: {e}")
-    st.stop()
+    st.error(f"데이터 로드 에러: {e}"); st.stop()
 
 with st.sidebar:
     st.title("☁️ 클라우드 메모리 챗봇")
-    st.caption("35만 자 OK / 멀티 페르소나 지원")
+    st.caption("35만 자 OK / 멀티 페르소나")
     
     # 모델 선택
     try: av_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]; av_models.sort()
@@ -231,47 +222,37 @@ with st.sidebar:
     try: ic = av_models.index(current_config.get("chat_model"))
     except: ic = 0
     chat_model_id = st.selectbox("모델", av_models, index=ic)
-    
     if chat_model_id != current_config.get("chat_model"):
         save_advanced_config(chat_model_id, current_config.get("memory_model", av_models[0]), "Standard", 1.0, 0.95, 8192)
         st.rerun()
     st.divider()
     
-    # 1. 캐릭터 선택
+    # 캐릭터 선택
     if CHARACTER_DB:
         char_options = list(CHARACTER_DB.keys())
         saved_cid = current_config.get("last_char_id", "")
         if saved_cid not in char_options: saved_cid = char_options[0]
-        
         try: default_cid_idx = char_options.index(saved_cid)
         except: default_cid_idx = 0
-        
         sel_cid = st.selectbox("🤖 캐릭터 선택", char_options, index=default_cid_idx, format_func=lambda x: CHARACTER_DB[x]["name"])
-        
         if sel_cid != current_config.get("last_char_id", ""):
             update_config("last_char_id", sel_cid); st.rerun()  
         curr_char = CHARACTER_DB[sel_cid]
     else:
-        st.info("Studio 탭에서 캐릭터를 먼저 만드세요.")
-        curr_char = None; sel_cid = None
+        st.info("Studio에서 캐릭터를 만드세요."); curr_char = None; sel_cid = None
 
-    # 2. 유저 페르소나 선택
+    # 유저 선택
     user_options = list(USER_DB.keys())
     saved_uid = current_config.get("last_user_id", "")
-    # 저장된 ID가 없거나 유효하지 않으면 첫 번째 유저 선택
-    if saved_uid not in user_options and user_options: 
-        saved_uid = user_options[0]
-
+    if saved_uid not in user_options and user_options: saved_uid = user_options[0]
     if user_options:
         try: ui = user_options.index(saved_uid)
         except: ui = 0
         sel_uid = st.selectbox("👤 내 페르소나 선택", user_options, index=ui, format_func=lambda x: USER_DB[x]["name"])
-        
         if sel_uid != current_config.get("last_user_id", ""): 
             update_config("last_user_id", sel_uid); st.rerun()
         curr_user = USER_DB[sel_uid]
     else:
-        # 유저 DB가 아예 비어있을 경우 (최초 실행)
         curr_user = {"name": "User", "gender": "?", "age": "?", "profile": "New Traveler"}
         sel_uid = "default"
 
@@ -279,10 +260,9 @@ with st.sidebar:
     if st.button("🔄 새로고침"): st.rerun()
 
 # 탭 구성
-tab1, tab2, tab3 = st.tabs(["💬 대화", "🧠 기억", "✏️ 스튜디오"])
+tab1, tab2, tab3 = st.tabs(["💬 대화", "🧠 기억", "✏️ 스튜디오(생성/수정)"])
 
 if sel_cid:
-    # 대화 UI
     sess_key = f"hist_{sel_cid}"
     if sess_key not in st.session_state:
         hf = load_json("history", f"{sel_cid}.json")
@@ -295,10 +275,9 @@ if sel_cid:
         for m in st.session_state[sess_key]:
             with st.chat_message(m["role"]): st.markdown(m["content"])
         
-        if p := st.chat_input(f"{curr_user['name']}(으)로 대화하기..."):
+        if p := st.chat_input(f"{curr_user['name']} (으)로 대화 중..."):
             st.session_state[sess_key].append({"role":"user", "content":p})
             save_json("history", f"{sel_cid}.json", st.session_state[sess_key]) 
-            
             try:
                 r = generate_response(chat_model_id, "", curr_char, curr_user, mem_data, curr_char.get("lorebooks",[]), st.session_state[sess_key], u_note, 1.0, 0.95, 8192)
                 st.session_state[sess_key].append({"role":"assistant", "content":r})
@@ -307,59 +286,97 @@ if sel_cid:
             except Exception as e: st.error(f"오류: {e}")
 
     with tab2:
-        st.subheader("DB 저장된 기억")
+        st.subheader("DB 기억 & 노트")
         st.json(mem_data)
         st.text_area("유저 노트", value=u_note, key="u_note_input")
-        if st.button("유저 노트 저장"):
+        if st.button("노트 저장"):
             save_user_note(sel_cid, st.session_state["u_note_input"]); st.success("저장됨")
-        if st.button("대화 초기화"):
+        if st.button("대화 초기화 (기억은 유지됨)"):
             st.session_state[sess_key] = []
             save_json("history", f"{sel_cid}.json", []); st.rerun()
 
     with tab3:
-        # 3. 스튜디오 (캐릭터 + 유저 설정)
+        # ----------------------------------------------------------------
+        # [UX 개선] 모드 선택 (생성 vs 수정)
+        # ----------------------------------------------------------------
         col1, col2 = st.columns(2)
         
-        # 왼쪽: 캐릭터 설정
+        # --- 왼쪽: 캐릭터 관리 ---
         with col1:
-            st.subheader("🤖 캐릭터 설정")
-            ncid = st.text_input("캐릭터 ID (영어)", sel_cid)
-            ncnm = st.text_input("캐릭터 이름", curr_char['name'] if curr_char else "")
-            ncds = st.text_area("설명 / 성격", curr_char['description'] if curr_char else "", height=100)
-            nfs = st.text_area("첫 메시지", curr_char['first_message'] if curr_char else "")
-            nsys = st.text_area("시스템 프롬프트 (세계관)", curr_char['system_prompt'] if curr_char else "", height=150)
+            st.subheader("🤖 캐릭터 관리")
+            # 모드 선택 스위치
+            mode_char = st.radio("작업 모드", ["기존 캐릭터 수정", "새 캐릭터 생성"], key="mode_char", horizontal=True)
             
-            if st.button("캐릭터 저장/생성"):
+            # 입력폼 값 세팅
+            if mode_char == "기존 캐릭터 수정" and curr_char:
+                c_id_val = sel_cid
+                c_name_val = curr_char['name']
+                c_desc_val = curr_char['description']
+                c_msg_val = curr_char['first_message']
+                c_sys_val = curr_char['system_prompt']
+                c_btn_txt = "수정사항 저장"
+                c_id_disable = True # 수정 때는 ID 변경 불가 (새 파일 되는 문제 방지)
+            else:
+                c_id_val = ""
+                c_name_val = ""
+                c_desc_val = ""
+                c_msg_val = ""
+                c_sys_val = ""
+                c_btn_txt = "새 캐릭터 생성"
+                c_id_disable = False
+            
+            # 입력 위젯
+            ncid = st.text_input("캐릭터 ID (영어만, 공백X)", value=c_id_val, disabled=c_id_disable)
+            ncnm = st.text_input("캐릭터 이름", value=c_name_val)
+            ncds = st.text_area("설명 / 성격", value=c_desc_val, height=100)
+            nfs = st.text_area("첫 메시지", value=c_msg_val)
+            nsys = st.text_area("시스템 프롬프트 (세계관)", value=c_sys_val, height=150)
+            
+            if st.button(c_btn_txt, key="btn_save_char"):
+                if not ncid: st.error("ID는 필수입니다."); st.stop()
                 new_data = {"name": ncnm, "description": ncds, "first_message": nfs, "system_prompt": nsys, "lorebooks": []}
+                # 수정 모드일 때 기존 데이터 유지를 위해 로어북 등은 병합, 여기서는 단순 덮어쓰기
                 save_json("characters", f"{ncid}.json", new_data)
-                st.success(f"{ncnm} 저장 완료!"); time.sleep(1); st.rerun()
+                st.success(f"캐릭터 '{ncnm}' 저장 완료!"); time.sleep(1); st.rerun()
 
-        # 오른쪽: 유저 페르소나 설정 (새로 추가된 부분!!)
+        # --- 오른쪽: 유저 관리 ---
         with col2:
-            st.subheader("👤 유저 페르소나(나) 설정")
-            st.caption("여러 명의 '나'를 만들어 상황에 맞게 연기하세요.")
-            
-            # 현재 선택된 유저 정보로 채워넣기
-            uid_input = st.text_input("유저 ID (영어)", sel_uid, help="예: me_v1, friend_player")
-            u_name = st.text_input("이름", curr_user.get('name', ''), help="봇이 당신을 부를 이름")
-            u_gender = st.text_input("성별", curr_user.get('gender', ''))
-            u_age = st.text_input("나이", curr_user.get('age', ''))
-            u_profile = st.text_area("프로필 / 설정", curr_user.get('profile', ''), height=150, help="당신이 어떤 사람인지 봇에게 알려주세요.")
+            st.subheader("👤 유저 페르소나 관리")
+            mode_user = st.radio("작업 모드", ["현재 페르소나 수정", "새 페르소나 생성"], key="mode_user", horizontal=True)
 
-            if st.button("유저 페르소나 저장/생성"):
-                if not uid_input: st.error("ID를 입력하세요"); st.stop()
-                new_user_data = {
-                    "name": u_name,
-                    "gender": u_gender,
-                    "age": u_age,
-                    "profile": u_profile
-                }
+            if mode_user == "현재 페르소나 수정" and curr_user:
+                u_id_val = sel_uid
+                u_name_val = curr_user.get('name', '')
+                u_gen_val = curr_user.get('gender', '')
+                u_age_val = curr_user.get('age', '')
+                u_prof_val = curr_user.get('profile', '')
+                u_btn_txt = "수정사항 저장"
+                u_id_disable = True
+            else:
+                u_id_val = ""
+                u_name_val = ""
+                u_gen_val = ""
+                u_age_val = ""
+                u_prof_val = ""
+                u_btn_txt = "새 페르소나 생성"
+                u_id_disable = False
+
+            uid_input = st.text_input("유저 ID (영어만)", value=u_id_val, disabled=u_id_disable)
+            u_name = st.text_input("유저 이름", value=u_name_val)
+            u_gender = st.text_input("성별", value=u_gen_val)
+            u_age = st.text_input("나이", value=u_age_val)
+            u_profile = st.text_area("프로필 (봇이 인식할 내 설정)", value=u_prof_val, height=150)
+
+            if st.button(u_btn_txt, key="btn_save_user"):
+                if not uid_input: st.error("ID는 필수입니다."); st.stop()
+                new_user_data = {"name": u_name, "gender": u_gender, "age": u_age, "profile": u_profile}
                 save_json("users", f"{uid_input}.json", new_user_data)
                 st.success(f"유저 '{u_name}' 저장 완료!"); time.sleep(1); st.rerun()
 
 else:
+    # 캐릭터가 하나도 없을 때 강제 생성 화면
     with tab3:
-        st.warning("먼저 캐릭터를 하나 생성하세요.")
-        ncid = st.text_input("새 캐릭터 ID")
+        st.warning("등록된 캐릭터가 없습니다. 첫 번째 캐릭터를 만들어주세요.")
+        ncid = st.text_input("캐릭터 ID")
         ncnm = st.text_input("이름")
         if st.button("생성"): save_json("characters", f"{ncid}.json", {"name":ncnm}); st.rerun()
