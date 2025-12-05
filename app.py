@@ -8,7 +8,7 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # ==========================================
-# 0. 초기 설정 및 보안 검사
+# 0. 설정 및 보안
 # ==========================================
 st.set_page_config(page_title="Eternal Memory Chat", layout="wide")
 
@@ -16,14 +16,12 @@ def check_password():
     if "PASSWORD" not in st.secrets["general"]:
         st.error("Secrets에 PASSWORD가 없습니다.")
         return False
-    
     def password_entered():
         if st.session_state["password"] == st.secrets["general"]["PASSWORD"]:
             st.session_state["password_correct"] = True
             del st.session_state["password"]
         else:
             st.session_state["password_correct"] = False
-
     if "password_correct" not in st.session_state:
         st.text_input("🔒 비밀번호", type="password", on_change=password_entered, key="password")
         return False
@@ -41,7 +39,7 @@ except:
     st.error("Secrets에 GOOGLE_API_KEY가 없습니다."); st.stop()
 
 # ==========================================
-# [핵심] 구글 시트 데이터베이스 연결 (DB)
+# [DB] 구글 시트 연결
 # ==========================================
 @st.cache_resource
 def init_sheet_connection():
@@ -58,7 +56,7 @@ except Exception as e:
     st.error(f"구글 시트 연결 실패! 설정 확인 필요.\n{e}"); st.stop()
 
 # ==========================================
-# [데이터 핸들링] 저장 / 로드 / 삭제
+# [Data] 저장 / 로드 / 삭제
 # ==========================================
 CHUNK_SIZE = 40000 
 
@@ -91,20 +89,19 @@ def save_json(folder, filename, data):
         st.toast(f"저장 중 문제 발생: {e}") 
         print(f"Save Error {full_key}: {e}")
 
-# [신규 기능] 삭제 함수 추가
 def delete_json(folder, filename):
     full_key = f"{folder}/{filename}"
     try:
         cell = SHEET.find(full_key, in_column=1)
         if cell:
-            SHEET.delete_rows(cell.row) # 해당 줄을 삭제
+            SHEET.delete_rows(cell.row)
             return True
     except Exception as e:
         st.error(f"삭제 실패: {e}")
     return False
 
 # ==========================================
-# 설정 및 모델 로드
+# 설정 및 로더
 # ==========================================
 DEFAULT_CONFIG = {  
     "chat_model": "models/gemini-1.5-pro",  
@@ -132,9 +129,6 @@ def save_advanced_config(chat, mem, lev, temp, top, tok):
                  "temperature":temp, "top_p":top, "max_tokens":tok})
     save_json("config", "main.json", curr)
 
-# ==========================================
-# 데이터 로더
-# ==========================================
 def get_all_data_optimized():
     try: return SHEET.get_all_values() 
     except: return []
@@ -224,7 +218,6 @@ except Exception as e:
 
 with st.sidebar:
     st.title("☁️ 클라우드 메모리 챗봇")
-    st.caption("삭제 기능 추가됨")
     
     try: av_models = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]; av_models.sort()
     except: av_models = ["models/gemini-1.5-flash"]
@@ -243,11 +236,10 @@ with st.sidebar:
         try: default_cid_idx = char_options.index(saved_cid)
         except: default_cid_idx = 0
         sel_cid = st.selectbox("🤖 캐릭터 선택", char_options, index=default_cid_idx, format_func=lambda x: CHARACTER_DB[x]["name"])
-        if sel_cid != current_config.get("last_char_id", ""):
-            update_config("last_char_id", sel_cid); st.rerun()  
+        if sel_cid != current_config.get("last_char_id", ""): update_config("last_char_id", sel_cid); st.rerun()  
         curr_char = CHARACTER_DB[sel_cid]
     else:
-        st.info("Studio에서 캐릭터를 만드세요."); curr_char = None; sel_cid = None
+        curr_char = None; sel_cid = None
 
     user_options = list(USER_DB.keys())
     saved_uid = current_config.get("last_user_id", "")
@@ -256,8 +248,7 @@ with st.sidebar:
         try: ui = user_options.index(saved_uid)
         except: ui = 0
         sel_uid = st.selectbox("👤 내 페르소나 선택", user_options, index=ui, format_func=lambda x: USER_DB[x]["name"])
-        if sel_uid != current_config.get("last_user_id", ""): 
-            update_config("last_user_id", sel_uid); st.rerun()
+        if sel_uid != current_config.get("last_user_id", ""): update_config("last_user_id", sel_uid); st.rerun()
         curr_user = USER_DB[sel_uid]
     else:
         curr_user = {"name": "User", "gender": "?", "age": "?", "profile": "New Traveler"}
@@ -282,10 +273,48 @@ if sel_cid:
     u_note = load_user_note(sel_cid)
 
     with tab1:
-        for m in st.session_state[sess_key]:
-            with st.chat_message(m["role"]): st.markdown(m["content"])
-        
-        if p := st.chat_input(f"{curr_user['name']} (으)로 대화 중..."):
+        # ====================================================
+        # [수정 기능] 메시지 렌더링 루프 개선
+        # ====================================================
+        # 메시지 하나하나에 번호(idx)를 붙여서 출력
+        for idx, m in enumerate(st.session_state[sess_key]):
+            with st.chat_message(m["role"]):
+                # Case 1: 현재 이 메시지가 '수정 모드'인 경우
+                if st.session_state.get(f"edit_mode_{sel_cid}") == idx:
+                    # 텍스트 수정 창 표시
+                    new_content = st.text_area(f"메시지 수정 (#{idx})", value=m["content"], height=100, key=f"edit_ta_{idx}")
+                    col_e1, col_e2 = st.columns([1, 4])
+                    if col_e1.button("💾 저장", key=f"save_{idx}"):
+                        # 1. 내용을 업데이트
+                        st.session_state[sess_key][idx]["content"] = new_content
+                        # 2. 구글 시트에 저장
+                        save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
+                        # 3. 수정 모드 종료
+                        st.session_state[f"edit_mode_{sel_cid}"] = -1
+                        st.rerun()
+                    if col_e2.button("취소", key=f"cancel_{idx}"):
+                        st.session_state[f"edit_mode_{sel_cid}"] = -1
+                        st.rerun()
+                
+                # Case 2: 평범한 '보기 모드'인 경우
+                else:
+                    st.markdown(m["content"])
+                    # 메시지 아래에 작게 수정/삭제 버튼 배치
+                    row_btn = st.columns([1, 1, 10]) # 왼쪽부터 수정, 삭제, 여백
+                    if row_btn[0].button("✏️", key=f"btn_edit_{idx}", help="이 메시지 수정"):
+                        st.session_state[f"edit_mode_{sel_cid}"] = idx
+                        st.rerun()
+                    
+                    if row_btn[1].button("🗑️", key=f"btn_del_{idx}", help="이 메시지 삭제"):
+                         # 리스트에서 해당 인덱스 삭제
+                        del st.session_state[sess_key][idx]
+                        save_json("history", f"{sel_cid}.json", st.session_state[sess_key])
+                        st.rerun()
+
+        # ====================================================
+        # 입력창 및 응답 생성
+        # ====================================================
+        if p := st.chat_input(f"{curr_user['name']} (으)로 대화..."):
             st.session_state[sess_key].append({"role":"user", "content":p})
             save_json("history", f"{sel_cid}.json", st.session_state[sess_key]) 
             try:
@@ -307,12 +336,9 @@ if sel_cid:
 
     with tab3:
         col1, col2 = st.columns(2)
-        
-        # --- 왼쪽: 캐릭터 관리 ---
         with col1:
             st.subheader("🤖 캐릭터 관리")
             mode_char = st.radio("작업 모드", ["기존 캐릭터 수정", "새 캐릭터 생성"], key="mode_char", horizontal=True)
-            
             if mode_char == "기존 캐릭터 수정" and curr_char:
                 c_id_val, c_name_val = sel_cid, curr_char['name']
                 c_desc_val, c_msg_val = curr_char['description'], curr_char['first_message']
@@ -333,19 +359,15 @@ if sel_cid:
                 save_json("characters", f"{ncid}.json", new_data)
                 st.success(f"저장 완료!"); time.sleep(1); st.rerun()
             
-            # [삭제 버튼 추가]
             if mode_char == "기존 캐릭터 수정" and curr_char:
                 st.divider()
-                if st.button("🗑️ 이 캐릭터 영구 삭제", type="primary", key="del_char_btn"):
+                if st.button("🗑️ 이 캐릭터 삭제", type="primary", key="del_char_btn"):
                     if delete_json("characters", f"{sel_cid}.json"):
-                        st.success("캐릭터 삭제됨. 잘 가요..."); time.sleep(1); st.rerun()
-                    else: st.error("삭제 실패")
+                        st.success("캐릭터 삭제됨."); time.sleep(1); st.rerun()
 
-        # --- 오른쪽: 유저 관리 ---
         with col2:
             st.subheader("👤 유저 페르소나 관리")
             mode_user = st.radio("작업 모드", ["현재 페르소나 수정", "새 페르소나 생성"], key="mode_user", horizontal=True)
-
             if mode_user == "현재 페르소나 수정" and curr_user:
                 u_id_val, u_name_val = sel_uid, curr_user.get('name', '')
                 u_gen_val, u_age_val = curr_user.get('gender', ''), curr_user.get('age', '')
@@ -366,12 +388,11 @@ if sel_cid:
                 save_json("users", f"{uid_input}.json", new_user_data)
                 st.success(f"저장 완료!"); time.sleep(1); st.rerun()
 
-            # [삭제 버튼 추가]
             if mode_user == "현재 페르소나 수정" and curr_user and sel_uid != "default":
                 st.divider()
-                if st.button("🗑️ 이 페르소나 영구 삭제", type="primary", key="del_user_btn"):
+                if st.button("🗑️ 이 페르소나 삭제", type="primary", key="del_user_btn"):
                     if delete_json("users", f"{sel_uid}.json"):
-                        st.success("페르소나 삭제됨."); time.sleep(1); st.rerun()
+                        st.success("삭제됨."); time.sleep(1); st.rerun()
 
 else:
     with tab3:
